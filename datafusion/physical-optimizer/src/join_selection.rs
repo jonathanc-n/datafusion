@@ -38,6 +38,7 @@ use datafusion_physical_plan::joins::{
     StreamJoinPartitionMode, SymmetricHashJoinExec,
 };
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use core::hash;
 use std::sync::Arc;
 
 /// The [`JoinSelection`] rule tries to modify a given plan so that it can
@@ -198,6 +199,7 @@ pub(crate) fn try_collect_left(
                     hash_join.projection.clone(),
                     PartitionMode::CollectLeft,
                     hash_join.null_equality(),
+                    hash_join.perfect,
                 )?)))
             }
         }
@@ -210,6 +212,7 @@ pub(crate) fn try_collect_left(
             hash_join.projection.clone(),
             PartitionMode::CollectLeft,
             hash_join.null_equality(),
+            hash_join.perfect,
         )?))),
         (false, true) => {
             if hash_join.join_type().supports_swap() {
@@ -245,6 +248,7 @@ pub(crate) fn partitioned_hash_join(
             hash_join.projection.clone(),
             PartitionMode::Partitioned,
             hash_join.null_equality(),
+            hash_join.perfect,
         )?))
     }
 }

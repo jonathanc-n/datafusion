@@ -1206,6 +1206,7 @@ impl protobuf::PhysicalPlanNode {
             projection,
             partition_mode,
             null_equality.into(),
+            false,
         )?))
     }
 

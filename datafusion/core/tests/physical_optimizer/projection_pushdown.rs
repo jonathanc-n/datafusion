@@ -1282,6 +1282,7 @@ fn test_hash_join_after_projection() -> Result<()> {
         None,
         PartitionMode::Auto,
         NullEquality::NullEqualsNothing,
+        false,
     )?);
     let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
         vec![

@@ -296,6 +296,7 @@ pub fn adjust_input_keys_ordering(
         projection,
         mode,
         null_equality,
+        perfect,
         ..
     }) = plan.as_any().downcast_ref::<HashJoinExec>()
     {
@@ -315,6 +316,7 @@ pub fn adjust_input_keys_ordering(
                         projection.clone(),
                         PartitionMode::Partitioned,
                         *null_equality,
+                        *perfect,
                     )
                     .map(|e| Arc::new(e) as _)
                 };
@@ -627,6 +629,7 @@ pub fn reorder_join_keys_to_inputs(
         projection,
         mode,
         null_equality,
+        perfect,
         ..
     }) = plan_any.downcast_ref::<HashJoinExec>()
     {
@@ -653,6 +656,7 @@ pub fn reorder_join_keys_to_inputs(
                     projection.clone(),
                     PartitionMode::Partitioned,
                     *null_equality,
+                    *perfect,
                 )?));
             }
         }

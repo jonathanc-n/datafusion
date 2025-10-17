@@ -1209,6 +1209,7 @@ impl DefaultPhysicalPlanner {
 
                 let prefer_hash_join =
                     session_state.config_options().optimizer.prefer_hash_join;
+                let allow_perfect_join = session_state.config_options().optimizer.allow_perfect_hash_join;
 
                 let join: Arc<dyn ExecutionPlan> = if join_on.is_empty() {
                     if join_filter.is_none() && matches!(join_type, JoinType::Inner) {
@@ -1252,6 +1253,7 @@ impl DefaultPhysicalPlanner {
                         None,
                         PartitionMode::Auto,
                         *null_equality,
+                        allow_perfect_join,
                     )?)
                 } else {
                     Arc::new(HashJoinExec::try_new(
@@ -1263,6 +1265,7 @@ impl DefaultPhysicalPlanner {
                         None,
                         PartitionMode::CollectLeft,
                         *null_equality,
+                        allow_perfect_join,
                     )?)
                 };
 

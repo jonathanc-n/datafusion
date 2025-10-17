@@ -848,6 +848,12 @@ config_namespace! {
         /// will be collected into a single partition
         pub hash_join_single_partition_threshold_rows: usize, default = 1024 * 128
 
+        /// omething
+        pub perfect_hash_join_threshold_rows: usize, default = 1000
+
+        ///
+        pub allow_perfect_hash_join: bool, default = false
+
         /// The default filter selectivity used by Filter Statistics
         /// when an exact selectivity cannot be determined. Valid values are
         /// between 0 (no selectivity) and 100 (all rows are selected).

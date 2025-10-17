@@ -33,11 +33,12 @@ use datafusion_physical_expr::{PhysicalExpr, PhysicalExprRef};
 use itertools::Itertools;
 use parking_lot::Mutex;
 use tokio::sync::Barrier;
+use tokio::sync::Notify;
 
 /// Represents the minimum and maximum values for a specific column.
 /// Used in dynamic filter pushdown to establish value boundaries.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ColumnBounds {
+pub struct ColumnBounds {
     /// The minimum value observed for this column
     min: ScalarValue,
     /// The maximum value observed for this column  
@@ -47,6 +48,14 @@ pub(crate) struct ColumnBounds {
 impl ColumnBounds {
     pub(crate) fn new(min: ScalarValue, max: ScalarValue) -> Self {
         Self { min, max }
+    }
+
+    pub fn max(&self) -> &ScalarValue {
+        &self.max
+    }
+
+    pub fn min(&self) -> &ScalarValue {
+        &self.min
     }
 }
 
@@ -109,6 +118,8 @@ pub(crate) struct SharedBoundsAccumulator {
     dynamic_filter: Arc<DynamicFilterPhysicalExpr>,
     /// Right side join expressions needed for creating filter bounds
     on_right: Vec<PhysicalExprRef>,
+    /// Notify when 
+    notify: Notify,
 }
 
 /// State protected by SharedBoundsAccumulator's mutex
@@ -116,9 +127,24 @@ struct SharedBoundsState {
     /// Bounds from completed partitions.
     /// Each element represents the column bounds computed by one partition.
     bounds: Vec<PartitionBounds>,
+    ready: bool,
 }
 
 impl SharedBoundsAccumulator {
+    pub(crate) fn get_partition_bounds(&self, partition_id: usize) -> Option<PartitionBounds> {
+        let inner = self.inner.lock();
+        inner.bounds.iter().find(|b| b.partition == partition_id).cloned()
+    }
+
+    pub(crate) async fn wait_until_ready(&self) {
+
+        if self.inner.lock().ready { return; }
+        loop {
+            self.notify.notified().await;
+            if self.inner.lock().ready { break; }
+        }
+    }
+
     /// Creates a new SharedBoundsAccumulator configured for the given partition mode
     ///
     /// This method calculates how many times `collect_build_side` will be called based on the
@@ -168,10 +194,12 @@ impl SharedBoundsAccumulator {
         Self {
             inner: Mutex::new(SharedBoundsState {
                 bounds: Vec::with_capacity(expected_calls),
+                ready: false,
             }),
             barrier: Barrier::new(expected_calls),
             dynamic_filter,
             on_right,
+            notify: Notify::new(),
         }
     }
 
@@ -294,12 +322,15 @@ impl SharedBoundsAccumulator {
 
         if self.barrier.wait().await.is_leader() {
             // All partitions have reported, so we can update the filter
-            let inner = self.inner.lock();
+            let mut inner = self.inner.lock();
             if !inner.bounds.is_empty() {
                 let filter_expr =
                     self.create_filter_from_partition_bounds(&inner.bounds)?;
                 self.dynamic_filter.update(filter_expr)?;
             }
+            inner.ready = true;
+            drop(inner);
+            self.notify.notify_waiters(); 
         }
 
         Ok(())

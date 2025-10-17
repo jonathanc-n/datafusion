@@ -18,7 +18,9 @@
 //! [`HashJoinExec`] Partitioned Hash Join Operator
 
 pub use exec::HashJoinExec;
+pub(crate) use perfect_hash_join::PerfectHashJoinStream;
 
 mod exec;
-mod shared_bounds;
+mod perfect_hash_join;
+pub mod shared_bounds;
 mod stream;

@@ -22,8 +22,13 @@
 use std::fmt::{self, Debug};
 use std::ops::Sub;
 
+use arrow::array::{
+    ArrayRef, UInt64Array
+};
+use datafusion_common::ScalarValue;
 use hashbrown::hash_table::Entry::{Occupied, Vacant};
 use hashbrown::HashTable;
+
 
 /// Maps a `u64` hash value based on the build side ["on" values] to a list of indices with this key's value.
 ///
@@ -115,8 +120,12 @@ pub trait JoinHashMapType: Send + Sync {
         offset: JoinHashMapOffset,
     ) -> (Vec<u32>, Vec<u64>, Option<JoinHashMapOffset>);
 
+    fn create_array(&self, batch: ArrayRef, min: i64, max: i64) -> UInt64Array;
+
     /// Returns `true` if the join hash map contains no entries.
     fn is_empty(&self) -> bool;
+
+    fn is_distinct(&self) -> bool;
 }
 
 pub struct JoinHashMapU32 {
@@ -124,18 +133,24 @@ pub struct JoinHashMapU32 {
     map: HashTable<(u64, u32)>,
     // Stores indices in chained list data structure
     next: Vec<u32>,
+    is_distinct: bool,
 }
 
 impl JoinHashMapU32 {
     #[cfg(test)]
     pub(crate) fn new(map: HashTable<(u64, u32)>, next: Vec<u32>) -> Self {
-        Self { map, next }
+        Self {
+            map,
+            next,
+            is_distinct: true,
+        }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             map: HashTable::with_capacity(cap),
             next: vec![0; cap],
+            is_distinct: true,
         }
     }
 }
@@ -154,7 +169,13 @@ impl JoinHashMapType for JoinHashMapU32 {
         iter: Box<dyn Iterator<Item = (usize, &'a u64)> + Send + 'a>,
         deleted_offset: usize,
     ) {
-        update_from_iter::<u32>(&mut self.map, &mut self.next, iter, deleted_offset);
+        update_from_iter::<u32>(
+            &mut self.map,
+            &mut self.next,
+            iter,
+            deleted_offset,
+            &mut self.is_distinct,
+        );
     }
 
     fn get_matched_indices<'a>(
@@ -180,8 +201,34 @@ impl JoinHashMapType for JoinHashMapU32 {
         )
     }
 
+    fn create_array(&self, keys: ArrayRef, min: i64, max: i64) -> UInt64Array {
+        let offset = min;
+        let len = max - min + 1;
+
+        let mut array: Vec<Option<u64>> = vec![None; len as usize];
+
+        self.map.len();
+
+        for (_, val) in self.map.iter() {
+            // Have to decrement `val` here because JoinHashMap inserts `idx + 1`
+            let left_index = (*val - 1) as u64;
+            let value = ScalarValue::try_from_array(&keys, left_index as usize).unwrap();
+            
+            let idx = i64::try_from(value.clone()).unwrap();
+            let array_idx = idx - offset;
+
+            array[array_idx as usize] = Some(left_index);
+        }
+
+        UInt64Array::from(array)
+    }
+
     fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    fn is_distinct(&self) -> bool {
+        self.is_distinct
     }
 }
 
@@ -190,18 +237,25 @@ pub struct JoinHashMapU64 {
     map: HashTable<(u64, u64)>,
     // Stores indices in chained list data structure
     next: Vec<u64>,
+    // Indicates if all entries in the map are distinct
+    is_distinct: bool,
 }
 
 impl JoinHashMapU64 {
     #[cfg(test)]
     pub(crate) fn new(map: HashTable<(u64, u64)>, next: Vec<u64>) -> Self {
-        Self { map, next }
+        Self {
+            map,
+            next,
+            is_distinct: true,
+        }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             map: HashTable::with_capacity(cap),
             next: vec![0; cap],
+            is_distinct: true,
         }
     }
 }
@@ -220,7 +274,13 @@ impl JoinHashMapType for JoinHashMapU64 {
         iter: Box<dyn Iterator<Item = (usize, &'a u64)> + Send + 'a>,
         deleted_offset: usize,
     ) {
-        update_from_iter::<u64>(&mut self.map, &mut self.next, iter, deleted_offset);
+        update_from_iter::<u64>(
+            &mut self.map,
+            &mut self.next,
+            iter,
+            deleted_offset,
+            &mut self.is_distinct,
+        );
     }
 
     fn get_matched_indices<'a>(
@@ -246,8 +306,34 @@ impl JoinHashMapType for JoinHashMapU64 {
         )
     }
 
+    fn create_array(&self, keys: ArrayRef, min: i64, max: i64) -> UInt64Array {
+        let offset = min;
+        let len = max - min + 1;
+
+        let mut array: Vec<Option<u64>> = vec![None; len as usize];
+
+        self.map.len();
+
+        for (_, val) in self.map.iter() {
+            // Have to decrement `val` here because JoinHashMap inserts `idx + 1`
+            let left_index = (*val - 1) as u64;
+            let value = ScalarValue::try_from_array(&keys, left_index as usize).unwrap();
+            
+            let idx = i64::try_from(value.clone()).unwrap();
+            let array_idx = idx - offset;
+
+            array[array_idx as usize] = Some(left_index);
+        }
+
+        UInt64Array::from(array)
+    }
+
     fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    fn is_distinct(&self) -> bool {
+        self.is_distinct
     }
 }
 
@@ -294,6 +380,7 @@ pub fn update_from_iter<'a, T>(
     next: &mut [T],
     iter: Box<dyn Iterator<Item = (usize, &'a u64)> + Send + 'a>,
     deleted_offset: usize,
+    is_distinct: &mut bool,
 ) where
     T: Copy + TryFrom<usize> + PartialOrd,
     <T as TryFrom<usize>>::Error: Debug,
@@ -314,6 +401,7 @@ pub fn update_from_iter<'a, T>(
                 *index = T::try_from(row + 1).unwrap();
                 // Update chained Vec at `row` with previous value
                 next[row - deleted_offset] = prev_index;
+                *is_distinct = false;
             }
             Vacant(vacant_entry) => {
                 vacant_entry.insert((hash_value, T::try_from(row + 1).unwrap()));

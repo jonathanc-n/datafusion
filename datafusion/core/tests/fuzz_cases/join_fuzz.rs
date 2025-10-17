@@ -769,6 +769,7 @@ impl JoinFuzzTestCase {
                 None,
                 PartitionMode::Partitioned,
                 NullEquality::NullEqualsNothing,
+                false,
             )
             .unwrap(),
         )

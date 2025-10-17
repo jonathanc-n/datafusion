@@ -358,6 +358,7 @@ pub struct HashJoinExec {
     /// Set when dynamic filter pushdown is detected in handle_child_pushdown_result.
     /// HashJoinExec also needs to keep a shared bounds accumulator for coordinating updates.
     dynamic_filter: Option<HashJoinExecDynamicFilter>,
+    pub perfect: bool,
 }
 
 #[derive(Clone)]
@@ -412,6 +413,7 @@ impl HashJoinExec {
         projection: Option<Vec<usize>>,
         partition_mode: PartitionMode,
         null_equality: NullEquality,
+        perfect: bool,
     ) -> Result<Self> {
         let left_schema = left.schema();
         let right_schema = right.schema();
@@ -443,7 +445,6 @@ impl HashJoinExec {
 
         // Initialize both dynamic filter and bounds accumulator to None
         // They will be set later if dynamic filtering is enabled
-
         Ok(HashJoinExec {
             left,
             right,
@@ -460,6 +461,7 @@ impl HashJoinExec {
             null_equality,
             cache,
             dynamic_filter: None,
+            perfect,
         })
     }
 
@@ -558,6 +560,7 @@ impl HashJoinExec {
             projection,
             self.mode,
             self.null_equality,
+            self.perfect,
         )
     }
 
@@ -682,6 +685,7 @@ impl HashJoinExec {
             ),
             partition_mode,
             self.null_equality(),
+            self.perfect,
         )?;
         // In case of anti / semi joins or if there is embedded projection in HashJoinExec, output column order is preserved, no need to add projection again
         if matches!(
@@ -875,6 +879,7 @@ impl ExecutionPlan for HashJoinExec {
             )?,
             // Keep the dynamic filter, bounds accumulator will be reset
             dynamic_filter: self.dynamic_filter.clone(),
+            perfect: self.perfect,
         }))
     }
 
@@ -897,6 +902,7 @@ impl ExecutionPlan for HashJoinExec {
             cache: self.cache.clone(),
             // Reset dynamic filter and bounds accumulator to initial state
             dynamic_filter: None,
+            perfect: self.perfect,
         }))
     }
 
@@ -1020,9 +1026,20 @@ impl ExecutionPlan for HashJoinExec {
             .map(|(_, right_expr)| Arc::clone(right_expr))
             .collect::<Vec<_>>();
 
+        let can_perfect = matches!(self.join_type, JoinType::Inner)
+            && on_left.clone().len() == 1
+            && on_right.clone().len() == 1
+            && on_left[0].clone().data_type(&self.left.schema())?.is_integer()
+            && on_right[0].clone().data_type(&self.right.schema())?.is_integer()
+            && self.perfect;
+            // && *self.partition_mode() == PartitionMode::Partitioned; // this is currently partitioned because in `stream.rs` if we try to call self.partition it will not work for collect left
+
+        // REMIDNER TO CHECK FOR NULLS
+
         Ok(Box::pin(HashJoinStream::new(
             partition,
             self.schema(),
+            self.right.schema(),
             on_right,
             self.filter.clone(),
             self.join_type,
@@ -1038,6 +1055,7 @@ impl ExecutionPlan for HashJoinExec {
             self.right.output_ordering().is_some(),
             bounds_accumulator,
             self.mode,
+            can_perfect,
         )))
     }
 
@@ -1102,6 +1120,7 @@ impl ExecutionPlan for HashJoinExec {
                 None,
                 *self.partition_mode(),
                 self.null_equality,
+                self.perfect,
             )?)))
         } else {
             try_embed_projection(projection, self)
@@ -1199,6 +1218,7 @@ impl ExecutionPlan for HashJoinExec {
                         filter: dynamic_filter,
                         bounds_accumulator: OnceLock::new(),
                     }),
+                    perfect: self.perfect,
                 });
                 result = result.with_updated_node(new_node as Arc<dyn ExecutionPlan>);
             }
@@ -1570,6 +1590,7 @@ mod tests {
             None,
             PartitionMode::CollectLeft,
             null_equality,
+            false,
         )
     }
 
@@ -1590,6 +1611,7 @@ mod tests {
             None,
             PartitionMode::CollectLeft,
             null_equality,
+            false,
         )
     }
 
@@ -1688,6 +1710,7 @@ mod tests {
             None,
             partition_mode,
             null_equality,
+            false,
         )?;
 
         let columns = columns(&join.schema());
@@ -4373,6 +4396,7 @@ mod tests {
                 None,
                 PartitionMode::Partitioned,
                 NullEquality::NullEqualsNothing,
+                false,
             )?;
 
             let stream = join.execute(1, task_ctx)?;

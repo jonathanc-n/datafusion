@@ -24,11 +24,14 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use crate::joins::hash_join::exec::JoinLeftData;
+use crate::joins::hash_join::perfect_hash_join::PerfectHashJoinStreamState;
 use crate::joins::hash_join::shared_bounds::SharedBoundsAccumulator;
+use crate::joins::hash_join::PerfectHashJoinStream;
 use crate::joins::utils::{
     equal_rows_arr, get_final_indices_from_shared_bitmap, OnceFut,
 };
 use crate::joins::PartitionMode;
+use crate::EmptyRecordBatchStream;
 use crate::{
     handle_state,
     hash_utils::create_hashes,
@@ -45,8 +48,9 @@ use crate::{
 use arrow::array::{ArrayRef, UInt32Array, UInt64Array};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use arrow_schema::DataType;
 use datafusion_common::{
-    internal_datafusion_err, internal_err, JoinSide, JoinType, NullEquality, Result,
+    internal_datafusion_err, internal_err, DataFusionError, JoinSide, JoinType, NullEquality, Result
 };
 use datafusion_physical_expr::PhysicalExprRef;
 
@@ -123,6 +127,8 @@ pub(super) enum HashJoinStreamState {
     WaitBuildSide,
     /// Waiting for bounds to be reported by all partitions
     WaitPartitionBoundsReport,
+    ///
+    ExecutePerfectHashJoinStream,
     /// Indicates that build-side has been collected, and stream is ready for fetching probe-side
     FetchProbeBatch,
     /// Indicates that non-empty batch has been fetched from probe-side, and is ready to be processed
@@ -180,6 +186,9 @@ pub(super) struct HashJoinStream {
     partition: usize,
     /// Input schema
     schema: Arc<Schema>,
+    ///
+    ///
+    right_schema: Arc<Schema>,
     /// equijoin columns from the right (probe side)
     on_right: Vec<PhysicalExprRef>,
     /// optional join filter
@@ -214,6 +223,10 @@ pub(super) struct HashJoinStream {
 
     /// Partitioning mode to use
     mode: PartitionMode,
+
+    /// For executing a `PerfectHashJoin`
+    perfect_hash_join: Option<SendableRecordBatchStream>,
+    can_perfect: bool,
 }
 
 impl RecordBatchStream for HashJoinStream {
@@ -302,6 +315,7 @@ impl HashJoinStream {
     pub(super) fn new(
         partition: usize,
         schema: Arc<Schema>,
+        right_schema: Arc<Schema>,
         on_right: Vec<PhysicalExprRef>,
         filter: Option<JoinFilter>,
         join_type: JoinType,
@@ -317,10 +331,12 @@ impl HashJoinStream {
         right_side_ordered: bool,
         bounds_accumulator: Option<Arc<SharedBoundsAccumulator>>,
         mode: PartitionMode,
+        can_perfect: bool,
     ) -> Self {
         Self {
             partition,
             schema,
+            right_schema,
             on_right,
             filter,
             join_type,
@@ -337,6 +353,8 @@ impl HashJoinStream {
             bounds_accumulator,
             bounds_waiter: None,
             mode,
+            perfect_hash_join: None,
+            can_perfect,
         }
     }
 
@@ -353,6 +371,10 @@ impl HashJoinStream {
                 }
                 HashJoinStreamState::WaitPartitionBoundsReport => {
                     handle_state!(ready!(self.wait_for_partition_bounds_report(cx)))
+                }
+                HashJoinStreamState::ExecutePerfectHashJoinStream => {
+                    let poll = handle_state!(ready!(self.execute_perfect_hash_join(cx)));
+                    self.join_metrics.baseline.record_poll(poll)
                 }
                 HashJoinStreamState::FetchProbeBatch => {
                     handle_state!(ready!(self.fetch_probe_batch(cx)))
@@ -383,10 +405,83 @@ impl HashJoinStream {
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<StatefulStreamResult<Option<RecordBatch>>>> {
+        // println!("doing partition: {}", self.partition);
         if let Some(ref mut fut) = self.bounds_waiter {
             ready!(fut.get_shared(cx))?;
         }
+
+        let build_side = self.build_side.try_as_ready_mut()?;
+
+        // Checking if the perfect hash join is valid and if all values in the hashmap are distinct
+        if self.can_perfect && build_side.left_data.hash_map.is_distinct() {
+            if let Some(bounds_accumulator) = &self.bounds_accumulator {
+                if let Some(partition_bounds) = bounds_accumulator.get_partition_bounds(self.partition) {
+                if let Some(bounds) = partition_bounds.get_column_bounds(0)
+                {
+                    let key_col = build_side.left_data.values()[0].clone();
+                    let (lower, upper) = (
+                        bounds.min().cast_to(&DataType::Int64).unwrap(),
+                        bounds.max().cast_to(&DataType::Int64).unwrap(),
+                    );
+
+                    // Retrieve min/max values from computed bounds
+                    let (min, max) =
+                        (i64::try_from(lower).unwrap(), i64::try_from(upper).unwrap());
+                    let build_array = build_side.left_data.hash_map.create_array(
+                        key_col,
+                        min.clone(),
+                        max.clone(),
+                    );
+
+                    let empty_batch_stream =
+                        EmptyRecordBatchStream::new(self.right_schema.clone());
+                    let right =
+                        std::mem::replace(&mut self.right, Box::pin(empty_batch_stream));
+                
+                    let perfect_hash_join = PerfectHashJoinStream::new(
+                        self.schema.clone(),
+                        self.join_type,
+                        build_array,
+                        build_side.left_data.batch().clone(),
+                        self.on_right[0].clone(),
+                        self.filter.clone(),
+                        right,
+                        self.batch_size,
+                        PerfectHashJoinStreamState::FetchProbeBatch,
+                        self.join_metrics.clone(),
+                        min,
+                        max,
+                    );
+
+                    self.perfect_hash_join = Some(Box::pin(perfect_hash_join));
+                    self.state = HashJoinStreamState::ExecutePerfectHashJoinStream;
+                    return Poll::Ready(Ok(StatefulStreamResult::Continue));
+                }
+            }
+            }
+        }
+
         self.state = HashJoinStreamState::FetchProbeBatch;
+        Poll::Ready(Ok(StatefulStreamResult::Continue))
+    }
+
+    fn execute_perfect_hash_join(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<StatefulStreamResult<Option<RecordBatch>>>> {
+        if let Some(perfect_hash_join) = &mut self.perfect_hash_join {
+            match ready!(perfect_hash_join.poll_next_unpin(cx)) {
+                None => {
+                    self.state = HashJoinStreamState::Completed;
+                    return Poll::Ready(Ok(StatefulStreamResult::Continue));
+                }
+                Some(Ok(batch)) => {
+                    return Poll::Ready(Ok(StatefulStreamResult::Ready(Some(batch))));
+                }
+                Some(Err(err)) => return Poll::Ready(Err(err)),
+            }
+        }
+
         Poll::Ready(Ok(StatefulStreamResult::Continue))
     }
 
@@ -423,7 +518,9 @@ impl HashJoinStream {
             self.bounds_waiter = Some(OnceFut::new(async move {
                 bounds_accumulator
                     .report_partition_bounds(left_side_partition_id, left_data_bounds)
-                    .await
+                    .await?;
+                bounds_accumulator.wait_until_ready().await;
+                Ok::<(), DataFusionError>(())
             }));
             self.state = HashJoinStreamState::WaitPartitionBoundsReport;
         } else {

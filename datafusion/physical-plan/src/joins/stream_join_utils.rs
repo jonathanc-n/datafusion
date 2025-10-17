@@ -22,6 +22,7 @@ use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
 use std::sync::Arc;
 
+use crate::joins::hash_join::shared_bounds::ColumnBounds;
 use crate::joins::join_hash_map::{
     get_matched_indices, get_matched_indices_with_limit_offset, update_from_iter,
     JoinHashMapOffset,
@@ -31,7 +32,8 @@ use crate::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder};
 use crate::{metrics, ExecutionPlan};
 
 use arrow::array::{
-    ArrowPrimitiveType, BooleanBufferBuilder, NativeAdapter, PrimitiveArray, RecordBatch,
+    ArrayRef, ArrowPrimitiveType, BooleanBufferBuilder, NativeAdapter, PrimitiveArray,
+    RecordBatch, UInt64Array,
 };
 use arrow::compute::concat_batches;
 use arrow::datatypes::{ArrowNativeType, Schema, SchemaRef};
@@ -62,7 +64,14 @@ impl JoinHashMapType for PruningJoinHashMap {
         deleted_offset: usize,
     ) {
         let slice: &mut [u64] = self.next.make_contiguous();
-        update_from_iter::<u64>(&mut self.map, slice, iter, deleted_offset);
+        let mut is_distinct = false;
+        update_from_iter::<u64>(
+            &mut self.map,
+            slice,
+            iter,
+            deleted_offset,
+            &mut is_distinct,
+        );
     }
 
     fn get_matched_indices<'a>(
@@ -94,6 +103,16 @@ impl JoinHashMapType for PruningJoinHashMap {
 
     fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+
+    fn create_array(&self, _keys: ArrayRef, _min: i64, _max: i64) -> UInt64Array {
+        unimplemented!()
+    }
+
+    // Symmetrical hash join does not use `is_distinct`, can use false here as default return
+    fn is_distinct(&self) -> bool {
+        false
     }
 }
 
