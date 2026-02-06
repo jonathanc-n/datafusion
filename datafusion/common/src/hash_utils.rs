@@ -483,7 +483,7 @@ fn hash_map_array(
     let first_offset = offsets.first().copied().unwrap_or_default() as usize;
     let last_offset = offsets.last().copied().unwrap_or_default() as usize;
     let entries_len = last_offset - first_offset;
-    
+
     // Only hash the entries that are actually referenced
     let mut values_hashes = vec![0u64; entries_len];
     let entries = array.entries();
