@@ -206,15 +206,22 @@ impl Precision<ScalarValue> {
     /// Calculates the sum of two (possibly inexact) [`ScalarValue`] values,
     /// conservatively propagating exactness information. If one of the input
     /// values is [`Precision::Absent`], the result is `Absent` too.
+    ///
+    /// Uses [`ScalarValue::add_checked`] so that integer overflow returns
+    /// an error (mapped to `Absent`) instead of silently wrapping.
+    ///
+    /// For performance-sensitive paths prefer [`precision_add`] which
+    /// avoids the Arrow array round-trip.
     pub fn add(&self, other: &Precision<ScalarValue>) -> Precision<ScalarValue> {
         match (self, other) {
-            (Precision::Exact(a), Precision::Exact(b)) => {
-                a.add(b).map(Precision::Exact).unwrap_or(Precision::Absent)
-            }
+            (Precision::Exact(a), Precision::Exact(b)) => a
+                .add_checked(b)
+                .map(Precision::Exact)
+                .unwrap_or(Precision::Absent),
             (Precision::Inexact(a), Precision::Exact(b))
             | (Precision::Exact(a), Precision::Inexact(b))
             | (Precision::Inexact(a), Precision::Inexact(b)) => a
-                .add(b)
+                .add_checked(b)
                 .map(Precision::Inexact)
                 .unwrap_or(Precision::Absent),
             (_, _) => Precision::Absent,

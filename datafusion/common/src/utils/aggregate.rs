@@ -20,9 +20,29 @@
 //! Provides a cheap pairwise [`ScalarValue`] addition that directly
 //! extracts inner primitive values, avoiding the expensive
 //! `ScalarValue::add` path (which round-trips through Arrow arrays).
+use arrow::datatypes::i256;
 
 use crate::stats::Precision;
 use crate::{Result, ScalarValue};
+
+/// Saturating addition for [`i256`] (which lacks a built-in
+/// `saturating_add`).  Returns `i256::MAX` on positive overflow and
+/// `i256::MIN` on negative overflow.
+#[inline]
+fn i256_saturating_add(a: i256, b: i256) -> i256 {
+    match a.checked_add(b) {
+        Some(sum) => sum,
+        None => {
+            // If b is non-negative the overflow is positive, otherwise
+            // negative.
+            if b >= i256::ZERO {
+                i256::MAX
+            } else {
+                i256::MIN
+            }
+        }
+    }
+}
 
 /// Add two [`ScalarValue`]s by directly extracting and adding their
 /// inner primitive values.
@@ -33,11 +53,11 @@ use crate::{Result, ScalarValue};
 ///
 /// For non-primitive types, falls back to `ScalarValue::add`.
 pub(crate) fn scalar_add(lhs: &ScalarValue, rhs: &ScalarValue) -> Result<ScalarValue> {
-    macro_rules! add_wrapping {
+    macro_rules! add_int {
         ($lhs:expr, $rhs:expr, $VARIANT:ident) => {
             match ($lhs, $rhs) {
                 (ScalarValue::$VARIANT(Some(a)), ScalarValue::$VARIANT(Some(b))) => {
-                    Ok(ScalarValue::$VARIANT(Some(a.wrapping_add(*b))))
+                    Ok(ScalarValue::$VARIANT(Some(a.saturating_add(*b))))
                 }
                 (ScalarValue::$VARIANT(None), other)
                 | (other, ScalarValue::$VARIANT(None)) => Ok(other.clone()),
@@ -52,7 +72,7 @@ pub(crate) fn scalar_add(lhs: &ScalarValue, rhs: &ScalarValue) -> Result<ScalarV
                 (
                     ScalarValue::$VARIANT(Some(a), p, s),
                     ScalarValue::$VARIANT(Some(b), _, _),
-                ) => Ok(ScalarValue::$VARIANT(Some(a.wrapping_add(*b)), *p, *s)),
+                ) => Ok(ScalarValue::$VARIANT(Some(a.saturating_add(*b)), *p, *s)),
                 (ScalarValue::$VARIANT(None, _, _), other)
                 | (other, ScalarValue::$VARIANT(None, _, _)) => Ok(other.clone()),
                 _ => unreachable!(),
@@ -74,21 +94,33 @@ pub(crate) fn scalar_add(lhs: &ScalarValue, rhs: &ScalarValue) -> Result<ScalarV
     }
 
     match lhs {
-        ScalarValue::Int8(_) => add_wrapping!(lhs, rhs, Int8),
-        ScalarValue::Int16(_) => add_wrapping!(lhs, rhs, Int16),
-        ScalarValue::Int32(_) => add_wrapping!(lhs, rhs, Int32),
-        ScalarValue::Int64(_) => add_wrapping!(lhs, rhs, Int64),
-        ScalarValue::UInt8(_) => add_wrapping!(lhs, rhs, UInt8),
-        ScalarValue::UInt16(_) => add_wrapping!(lhs, rhs, UInt16),
-        ScalarValue::UInt32(_) => add_wrapping!(lhs, rhs, UInt32),
-        ScalarValue::UInt64(_) => add_wrapping!(lhs, rhs, UInt64),
+        ScalarValue::Int8(_) => add_int!(lhs, rhs, Int8),
+        ScalarValue::Int16(_) => add_int!(lhs, rhs, Int16),
+        ScalarValue::Int32(_) => add_int!(lhs, rhs, Int32),
+        ScalarValue::Int64(_) => add_int!(lhs, rhs, Int64),
+        ScalarValue::UInt8(_) => add_int!(lhs, rhs, UInt8),
+        ScalarValue::UInt16(_) => add_int!(lhs, rhs, UInt16),
+        ScalarValue::UInt32(_) => add_int!(lhs, rhs, UInt32),
+        ScalarValue::UInt64(_) => add_int!(lhs, rhs, UInt64),
         ScalarValue::Float16(_) => add_float!(lhs, rhs, Float16),
         ScalarValue::Float32(_) => add_float!(lhs, rhs, Float32),
         ScalarValue::Float64(_) => add_float!(lhs, rhs, Float64),
         ScalarValue::Decimal32(_, _, _) => add_decimal!(lhs, rhs, Decimal32),
         ScalarValue::Decimal64(_, _, _) => add_decimal!(lhs, rhs, Decimal64),
         ScalarValue::Decimal128(_, _, _) => add_decimal!(lhs, rhs, Decimal128),
-        ScalarValue::Decimal256(_, _, _) => add_decimal!(lhs, rhs, Decimal256),
+        ScalarValue::Decimal256(_, _, _) => match (lhs, rhs) {
+            (
+                ScalarValue::Decimal256(Some(a), p, s),
+                ScalarValue::Decimal256(Some(b), _, _),
+            ) => Ok(ScalarValue::Decimal256(
+                Some(i256_saturating_add(*a, *b)),
+                *p,
+                *s,
+            )),
+            (ScalarValue::Decimal256(None, _, _), other)
+            | (other, ScalarValue::Decimal256(None, _, _)) => Ok(other.clone()),
+            _ => unreachable!(),
+        },
         // Fallback: use the existing ScalarValue::add
         _ => lhs.add(rhs),
     }
