@@ -210,7 +210,7 @@ impl Precision<ScalarValue> {
     /// Uses [`ScalarValue::add_checked`] so that integer overflow returns
     /// an error (mapped to `Absent`) instead of silently wrapping.
     ///
-    /// For performance-sensitive paths prefer [`precision_add`] which
+    /// For performance-sensitive paths prefer `precision_add` which
     /// avoids the Arrow array round-trip.
     pub fn add(&self, other: &Precision<ScalarValue>) -> Precision<ScalarValue> {
         match (self, other) {
