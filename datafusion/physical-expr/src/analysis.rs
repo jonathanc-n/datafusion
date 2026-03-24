@@ -319,15 +319,14 @@ fn calculate_selectivity(
             (Some(initial_interval), Some(target_interval)) => {
                 if let Precision::Exact(distinct_count)
                 | Precision::Inexact(distinct_count) = target.distinct_count
-                {
-                    if let Some(s) = singleton_selectivity(
+                    && let Some(s) = singleton_selectivity(
                         initial_interval,
                         target_interval,
                         distinct_count,
-                    ) {
-                        acc *= s;
-                        continue;
-                    }
+                    )
+                {
+                    acc *= s;
+                    continue;
                 }
                 acc *= cardinality_ratio(initial_interval, target_interval);
             }
