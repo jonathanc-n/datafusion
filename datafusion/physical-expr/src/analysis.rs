@@ -485,6 +485,11 @@ mod tests {
         .unwrap_err();
         assert_contains!(analysis_error.to_string(), expected_error);
     }
+
+    // ---------------------------------------------------------------------------
+    // Unit tests for singleton_selectivity and calculate_selectivity
+    // ---------------------------------------------------------------------------
+
     fn make_boundary(lower: i32, upper: i32, distinct_count: usize) -> ExprBoundaries {
         ExprBoundaries {
             column: Column::new("a", 0),
@@ -542,9 +547,11 @@ mod tests {
     fn test_calculate_selectivity_already_singleton_initial_interval() {
         let already_singleton = make_boundary(7, 7, 1);
 
-        let selectivity =
-            calculate_selectivity(&[already_singleton.clone()], &[already_singleton])
-                .unwrap();
+        let selectivity = calculate_selectivity(
+            std::slice::from_ref(&already_singleton),
+            std::slice::from_ref(&already_singleton),
+        )
+        .unwrap();
 
         let wide_initial = make_boundary(1, 100, 50);
         let same_singleton_target = make_boundary(7, 7, 50);
