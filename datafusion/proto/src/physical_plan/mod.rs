@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -78,7 +79,7 @@ use datafusion_physical_plan::joins::{
 };
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::memory::LazyMemoryExec;
-use datafusion_physical_plan::metrics::MetricType;
+use datafusion_physical_plan::metrics::{MetricCategory, MetricType};
 use datafusion_physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion_physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion_physical_plan::repartition::RepartitionExec;
@@ -695,6 +696,7 @@ impl protobuf::PhysicalPlanNode {
         let filter = FilterExecBuilder::new(predicate, input)
             .apply_projection(projection)?
             .with_batch_size(filter.batch_size as usize)
+            .with_fetch(filter.fetch.map(|f| f as usize))
             .build()?;
         match filter_selectivity {
             Ok(filter_selectivity) => Ok(Arc::new(
@@ -1010,10 +1012,11 @@ impl protobuf::PhysicalPlanNode {
             codec,
             proto_converter,
         )?;
-        Ok(Arc::new(RepartitionExec::try_new(
-            input,
-            partitioning.unwrap(),
-        )?))
+        let mut repart_exec = RepartitionExec::try_new(input, partitioning.unwrap())?;
+        if repart.preserve_order {
+            repart_exec = repart_exec.with_preserve_order();
+        }
+        Ok(Arc::new(repart_exec))
     }
 
     fn try_into_global_limit_physical_plan(
@@ -1828,10 +1831,21 @@ impl protobuf::PhysicalPlanNode {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input: Arc<dyn ExecutionPlan> =
             into_physical_plan(&analyze.input, ctx, codec, proto_converter)?;
+        let metric_categories = if analyze.has_metric_categories {
+            let cats: Result<Vec<MetricCategory>> = analyze
+                .metric_categories
+                .iter()
+                .map(|s| s.parse::<MetricCategory>())
+                .collect();
+            Some(cats?)
+        } else {
+            None
+        };
         Ok(Arc::new(AnalyzeExec::new(
             analyze.verbose,
             analyze.show_statistics,
-            vec![MetricType::SUMMARY, MetricType::DEV],
+            vec![MetricType::Summary, MetricType::Dev],
+            metric_categories,
             input,
             Arc::new(convert_required!(analyze.schema)?),
         )))
@@ -2299,6 +2313,10 @@ impl protobuf::PhysicalPlanNode {
             codec,
             proto_converter,
         )?;
+        let (has_metric_categories, metric_categories) = match exec.metric_categories() {
+            Some(cats) => (true, cats.iter().map(|c| c.to_string()).collect()),
+            None => (false, vec![]),
+        };
         Ok(protobuf::PhysicalPlanNode {
             physical_plan_type: Some(PhysicalPlanType::Analyze(Box::new(
                 protobuf::AnalyzeExecNode {
@@ -2306,6 +2324,8 @@ impl protobuf::PhysicalPlanNode {
                     show_statistics: exec.show_statistics(),
                     input: Some(Box::new(input)),
                     schema: Some(exec.schema().as_ref().try_into()?),
+                    has_metric_categories,
+                    metric_categories,
                 },
             ))),
         })
@@ -2334,6 +2354,7 @@ impl protobuf::PhysicalPlanNode {
                         v.iter().map(|x| *x as u32).collect::<Vec<u32>>()
                     }),
                     batch_size: exec.batch_size() as u32,
+                    fetch: exec.fetch().map(|f| f as u32),
                 },
             ))),
         })
@@ -3054,6 +3075,7 @@ impl protobuf::PhysicalPlanNode {
                 protobuf::RepartitionExecNode {
                     input: Some(Box::new(input)),
                     partitioning: Some(pb_partitioning),
+                    preserve_order: exec.preserve_order(),
                 },
             ))),
         })
@@ -3650,7 +3672,7 @@ pub trait AsExecutionPlan: Debug + Send + Sync + Clone {
         Self: Sized;
 }
 
-pub trait PhysicalExtensionCodec: Debug + Send + Sync {
+pub trait PhysicalExtensionCodec: Debug + Send + Sync + Any {
     fn try_decode(
         &self,
         buf: &[u8],

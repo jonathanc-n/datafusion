@@ -781,7 +781,7 @@ impl DataSource for FileScanConfig {
         SchedulingType::Cooperative
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         if let Some(partition) = partition {
             // Get statistics for a specific partition
             // Note: FileGroup statistics include partition columns (computed from partition_values)
@@ -791,22 +791,28 @@ impl DataSource for FileScanConfig {
                 // Project the statistics based on the projection
                 let output_schema = self.projected_schema()?;
                 return if let Some(projection) = self.file_source.projection() {
-                    projection.project_statistics(stat.clone(), &output_schema)
+                    Ok(Arc::new(
+                        projection.project_statistics(stat.clone(), &output_schema)?,
+                    ))
                 } else {
-                    Ok(stat.clone())
+                    Ok(Arc::new(stat.clone()))
                 };
             }
             // If no statistics available for this partition, return unknown
-            Ok(Statistics::new_unknown(self.projected_schema()?.as_ref()))
+            Ok(Arc::new(Statistics::new_unknown(
+                self.projected_schema()?.as_ref(),
+            )))
         } else {
             // Return aggregate statistics across all partitions
             let statistics = self.statistics();
             let projection = self.file_source.projection();
             let output_schema = self.projected_schema()?;
             if let Some(projection) = &projection {
-                projection.project_statistics(statistics.clone(), &output_schema)
+                Ok(Arc::new(
+                    projection.project_statistics(statistics.clone(), &output_schema)?,
+                ))
             } else {
-                Ok(statistics)
+                Ok(Arc::new(statistics))
             }
         }
     }
@@ -1534,13 +1540,12 @@ mod tests {
     };
 
     use arrow::datatypes::Field;
+    use datafusion_common::ColumnStatistics;
     use datafusion_common::stats::Precision;
-    use datafusion_common::{ColumnStatistics, internal_err};
-    use datafusion_expr::{Operator, SortExpr};
+    use datafusion_expr::SortExpr;
     use datafusion_physical_expr::create_physical_sort_expr;
-    use datafusion_physical_expr::expressions::{BinaryExpr, Column, Literal};
+    use datafusion_physical_expr::expressions::Literal;
     use datafusion_physical_expr::projection::ProjectionExpr;
-    use datafusion_physical_expr_common::sort_expr::PhysicalSortExpr;
 
     #[derive(Clone)]
     struct InexactSortPushdownSource {

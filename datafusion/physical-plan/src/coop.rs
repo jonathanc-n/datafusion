@@ -311,7 +311,7 @@ impl ExecutionPlan for CooperativeExec {
         Ok(make_cooperative(child_stream))
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         self.input.partition_statistics(partition)
     }
 
@@ -401,11 +401,10 @@ pub fn make_cooperative(stream: SendableRecordBatchStream) -> SendableRecordBatc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::RecordBatchStreamAdapter;
 
     use arrow_schema::SchemaRef;
 
-    use futures::{StreamExt, stream};
+    use futures::stream;
 
     // This is the hardcoded value Tokio uses
     const TASK_BUDGET: usize = 128;

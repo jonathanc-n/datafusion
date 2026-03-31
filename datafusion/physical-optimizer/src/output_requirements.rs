@@ -246,7 +246,7 @@ impl ExecutionPlan for OutputRequirementExec {
         unreachable!();
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         self.input.partition_statistics(partition)
     }
 
@@ -430,7 +430,14 @@ fn require_top_ordering_helper(
         // be responsible for (i.e. the originator of) the global ordering.
         let (new_child, is_changed) =
             require_top_ordering_helper(Arc::clone(children.swap_remove(0)))?;
-        Ok((plan.with_new_children(vec![new_child])?, is_changed))
+
+        let plan = if is_changed {
+            plan.with_new_children(vec![new_child])?
+        } else {
+            plan
+        };
+
+        Ok((plan, is_changed))
     } else {
         // Stop searching, there is no global ordering desired for the query.
         Ok((plan, false))
